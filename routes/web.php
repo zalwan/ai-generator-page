@@ -24,6 +24,7 @@ Route::middleware('auth')->group(function () {
 
     Route::get('/sales-pages', [SalesPageController::class, 'index'])->name('sales-pages.index');
     Route::get('/sales-pages/create', [SalesPageController::class, 'create'])->name('sales-pages.create');
+    Route::post('/sales-pages/suggest', [SalesPageController::class, 'suggest'])->name('sales-pages.suggest');
     Route::post('/sales-pages', [SalesPageController::class, 'store'])->name('sales-pages.store');
     Route::get('/sales-pages/{salesPage}', [SalesPageController::class, 'show'])->name('sales-pages.show');
     Route::get('/sales-pages/{salesPage}/preview', [SalesPageController::class, 'preview'])->name('sales-pages.preview');

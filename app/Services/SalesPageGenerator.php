@@ -17,6 +17,200 @@ class SalesPageGenerator
     public function __construct(private ContextManager $context) {}
 
     /**
+     * Field-specific instruction + static fallback list. Used for suggestions.
+     *
+     * @var array<string, array{label:string, instruction:string, fallback:array<int,string>}>
+     */
+    private const FIELDS = [
+        'description' => [
+            'label' => 'Deskripsi produk',
+            'instruction' => 'Tiap saran adalah ringkasan produk 1-2 kalimat yang jelas dan menjual.',
+            'fallback' => [
+                'Platform all-in-one untuk mengelola penjualan dan pelanggan dari satu dashboard.',
+                'Alat produktivitas yang membantu tim menyelesaikan pekerjaan 2x lebih cepat.',
+                'Solusi digital yang dirancang khusus untuk kebutuhan bisnis Anda.',
+                'Aplikasi modern dengan fitur lengkap dan tampilan intuitif.',
+            ],
+        ],
+        'features' => [
+            'label' => 'Fitur utama',
+            'instruction' => 'Tiap saran adalah satu nama fitur singkat (maks 6 kata).',
+            'fallback' => [
+                'Dashboard analitik real-time',
+                'Integrasi dengan WhatsApp Business',
+                'Laporan otomatis harian',
+                'Manajemen pengguna multi-role',
+                'Template siap pakai',
+                'Dukungan 24/7 via chat',
+            ],
+        ],
+        'target_audience' => [
+            'label' => 'Target audiens',
+            'instruction' => 'Tiap saran adalah persona target audiens singkat (2-6 kata).',
+            'fallback' => [
+                'Pemilik UMKM',
+                'Founder startup early-stage',
+                'Marketer digital',
+                'Freelancer kreatif',
+                'Manajer operasional perusahaan menengah',
+            ],
+        ],
+        'price' => [
+            'label' => 'Harga',
+            'instruction' => 'Tiap saran adalah satu format harga dalam IDR (contoh: "Rp 199.000 / bulan").',
+            'fallback' => [
+                'Rp 99.000 / bulan',
+                'Rp 299.000 / bulan',
+                'Rp 1.499.000 / tahun',
+                'Rp 499.000 sekali bayar',
+            ],
+        ],
+        'usp' => [
+            'label' => 'USP / keunikan',
+            'instruction' => 'Tiap saran adalah satu kalimat singkat yang menyoroti keunikan produk.',
+            'fallback' => [
+                'Satu-satunya solusi yang menggabungkan otomatisasi dan personalisasi.',
+                'Setup kurang dari 5 menit tanpa perlu coding.',
+                'Harga paling kompetitif di kelasnya dengan fitur premium.',
+                'Dibuat oleh praktisi lokal yang paham pasar Indonesia.',
+            ],
+        ],
+    ];
+
+    /**
+     * Suggest 3-6 options for a single form field, using history as soft context.
+     *
+     * @param  array<string,mixed>  $formState  current values the user has typed
+     * @return array{suggestions: array<int,string>, source: 'llm'|'fallback'}
+     */
+    public function suggest(string $field, array $formState, \App\Models\User $user): array
+    {
+        if (! isset(self::FIELDS[$field])) {
+            throw new \InvalidArgumentException("Field tidak didukung: $field");
+        }
+
+        // Soft fallback when the LLM isn't configured or fails — keeps UX working.
+        if (! $this->isConfigured()) {
+            return ['suggestions' => self::FIELDS[$field]['fallback'], 'source' => 'fallback'];
+        }
+
+        try {
+            $bundle = $this->context->buildForUser($user, 3);
+            $raw = $this->callSuggestionLlm($field, $formState, $bundle['summary']);
+            $decoded = $this->parseJson($raw);
+            $items = array_values(array_filter(array_map('strval', (array) ($decoded['suggestions'] ?? []))));
+
+            if (empty($items)) {
+                return ['suggestions' => self::FIELDS[$field]['fallback'], 'source' => 'fallback'];
+            }
+
+            return ['suggestions' => array_slice($items, 0, 6), 'source' => 'llm'];
+        } catch (\Throwable $e) {
+            Log::warning('Suggestion LLM call failed, using fallback', ['field' => $field, 'err' => $e->getMessage()]);
+
+            return ['suggestions' => self::FIELDS[$field]['fallback'], 'source' => 'fallback'];
+        }
+    }
+
+    private function isConfigured(): bool
+    {
+        return (string) config('services.openai.api_key') !== '' && (string) config('services.openai.base_url') !== '';
+    }
+
+    private function callSuggestionLlm(string $field, array $formState, string $contextSummary): string
+    {
+        $spec = self::FIELDS[$field];
+
+        $system = <<<'SYS'
+You are a senior copywriter helping a user brainstorm ideas for their sales page.
+Return ONLY valid JSON matching the schema. No prose, no markdown fences.
+Produce 4-5 varied, concise suggestions in Bahasa Indonesia.
+Use the user's history (if any) to stay consistent with their tone & audience.
+SYS;
+
+        $userMsg = sprintf(
+            "HISTORY CONTEXT:\n%s\n\nCURRENT FORM STATE:\n- Product name: %s\n- Description: %s\n- Target audience: %s\n- USP: %s\n- Tone: %s\n\nREQUESTED FIELD: %s\nINSTRUCTION: %s\n\nReturn JSON: { \"suggestions\": string[] }",
+            $contextSummary,
+            $formState['product_name'] ?? '',
+            $formState['description'] ?? '',
+            $formState['target_audience'] ?? '',
+            $formState['usp'] ?? '',
+            $formState['tone'] ?? '',
+            $spec['label'],
+            $spec['instruction'],
+        );
+
+        $base = rtrim((string) config('services.openai.base_url'), '/');
+        $key = (string) config('services.openai.api_key');
+        $model = (string) config('services.openai.model');
+
+        $payload = [
+            'model' => $model,
+            'temperature' => 0.9,
+            'messages' => [
+                ['role' => 'system', 'content' => $system],
+                ['role' => 'user', 'content' => $userMsg],
+            ],
+            'response_format' => $this->suggestionResponseFormat(),
+        ];
+
+        $response = Http::withToken($key)
+            ->timeout(min((int) config('services.openai.timeout', 60), 30))
+            ->acceptJson()
+            ->post($base.'/chat/completions', $payload);
+
+        if ($response->status() === 400 && config('services.openai.schema_mode', true)) {
+            $body = strtolower((string) $response->body());
+            if (str_contains($body, 'json_schema') || str_contains($body, 'response_format')) {
+                $payload['response_format'] = ['type' => 'json_object'];
+                $response = Http::withToken($key)
+                    ->timeout(min((int) config('services.openai.timeout', 60), 30))
+                    ->acceptJson()
+                    ->post($base.'/chat/completions', $payload);
+            }
+        }
+
+        if ($response->failed()) {
+            throw new RuntimeException('LLM suggest request failed: '.$response->status());
+        }
+
+        $content = data_get($response->json(), 'choices.0.message.content');
+        if (! is_string($content) || $content === '') {
+            throw new RuntimeException('LLM returned empty suggestion content');
+        }
+
+        return $content;
+    }
+
+    private function suggestionResponseFormat(): array
+    {
+        if (! config('services.openai.schema_mode', true)) {
+            return ['type' => 'json_object'];
+        }
+
+        return [
+            'type' => 'json_schema',
+            'json_schema' => [
+                'name' => 'field_suggestions',
+                'strict' => true,
+                'schema' => [
+                    'type' => 'object',
+                    'additionalProperties' => false,
+                    'required' => ['suggestions'],
+                    'properties' => [
+                        'suggestions' => [
+                            'type' => 'array',
+                            'minItems' => 3,
+                            'maxItems' => 6,
+                            'items' => ['type' => 'string'],
+                        ],
+                    ],
+                ],
+            ],
+        ];
+    }
+
+    /**
      * @param  array<string,mixed>  $input
      * @return array{content: array<string,mixed>, context_summary: string}
      */

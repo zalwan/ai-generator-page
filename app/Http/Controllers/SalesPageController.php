@@ -6,6 +6,7 @@ use App\Http\Requests\StoreSalesPageRequest;
 use App\Models\SalesPage;
 use App\Services\ContextManager;
 use App\Services\SalesPageGenerator;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Log;
@@ -51,6 +52,23 @@ class SalesPageController extends Controller
         return redirect()
             ->route('sales-pages.show', $page)
             ->with('status', 'Halaman berhasil dibuat dengan konteks dari riwayat Anda.');
+    }
+
+    public function suggest(Request $request, SalesPageGenerator $generator): JsonResponse
+    {
+        $data = $request->validate([
+            'field' => ['required', 'string', 'in:description,features,target_audience,price,usp'],
+            'form' => ['nullable', 'array'],
+            'form.product_name' => ['nullable', 'string', 'max:255'],
+            'form.description' => ['nullable', 'string', 'max:2000'],
+            'form.target_audience' => ['nullable', 'string', 'max:255'],
+            'form.usp' => ['nullable', 'string', 'max:500'],
+            'form.tone' => ['nullable', 'string', 'max:100'],
+        ]);
+
+        $result = $generator->suggest($data['field'], $data['form'] ?? [], $request->user());
+
+        return response()->json($result);
     }
 
     public function show(Request $request, SalesPage $salesPage)
